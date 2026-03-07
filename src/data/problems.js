@@ -94,19 +94,27 @@ class Solution {
         ],
         constraints: ["1 ≤ s.length ≤ 10⁵", "s[i] is a printable ascii character"],
         starterCode: {
-            javascript: `function reverseString(s) {
-  // Write your solution here
-  
+                        javascript: `function reverseString(s) {
+    // Write your solution here
+    let left = 0;
+    let right = s.length - 1;
+    while (left < right) {
+        const temp = s[left];
+        s[left] = s[right];
+        s[right] = temp;
+        left++;
+        right--;
+    }
 }
 
 // Test cases
 let test1 = ["h","e","l","l","o"];
 reverseString(test1);
-console.log(test1); // Expected: ["o","l","l","e","h"]
+console.log(JSON.stringify(test1)); // Expected: ["o","l","l","e","h"]
 
 let test2 = ["H","a","n","n","a","h"];
 reverseString(test2);
-console.log(test2); // Expected: ["h","a","n","n","a","H"]`,
+console.log(JSON.stringify(test2)); // Expected: ["h","a","n","n","a","H"]`,
             python: `def reverseString(s):
     # Write your solution here
     pass
