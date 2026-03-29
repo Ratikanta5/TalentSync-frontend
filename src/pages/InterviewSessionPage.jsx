@@ -1,87 +1,197 @@
-import { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router';
 import { useUser } from '@clerk/clerk-react';
 import axios from '../lib/axios';
 import toast from 'react-hot-toast';
 import Navbar from '../components/Navbar';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { Loader2, Play, Check, X, PhoneOffIcon, Loader2Icon } from 'lucide-react';
+import {
+  FilePlus2,
+  FileText,
+  Loader2,
+  Loader2Icon,
+  PhoneOffIcon,
+  Play,
+  Plus,
+  RefreshCcw,
+  Trash2,
+} from 'lucide-react';
 import CodeEditorPanel from '../components/CodeEditorPanel';
+import OutputPanel from '../components/OutputPanel';
 import { executeCode } from '../lib/piston';
-
-// Stream.io imports - SAME pattern as working SessionPage
 import { StreamCall, StreamVideo } from '@stream-io/video-react-sdk';
 import { StreamChat } from 'stream-chat';
+import { io } from 'socket.io-client';
 import VideoCallUI from '../components/VideoCallUI';
 import { initializeStreamClient, disconnectStreamClient } from '../lib/stream';
 
 import '@stream-io/video-react-sdk/dist/css/styles.css';
+
+const emptyDraft = {
+  title: '',
+  summary: '',
+  level: 'medium',
+  problemStatement: '',
+  timer: 30,
+};
+
+const LANGUAGE_DEFAULT_SNIPPETS = {
+  javascript: 'console.log("Hello from JavaScript");',
+  python: 'print("Hello from Python")',
+  java: `class Main {
+  public static void main(String[] args) {
+    System.out.println("Hello from Java");
+  }
+}`,
+};
+
+const normalizeQuestion = (question = {}) => ({
+  ...question,
+  summary: question.summary ?? question.description ?? '',
+  level: question.level ?? question.difficulty ?? 'medium',
+  timer: question.timer ?? question.timeLimit ?? 30,
+});
+
+const getApiErrorMessage = (error, fallbackMessage) => {
+  const details = error?.response?.data?.details;
+  if (Array.isArray(details) && details.length > 0) {
+    return details[0];
+  }
+
+  return (
+    error?.response?.data?.message ||
+    error?.response?.data?.error ||
+    error?.message ||
+    fallbackMessage
+  );
+};
+
+const getSocketServerUrl = () => {
+  const apiUrl = import.meta.env.VITE_API_URL || window.location.origin;
+
+  try {
+    const parsedUrl = new URL(apiUrl);
+    parsedUrl.pathname = '';
+    parsedUrl.search = '';
+    parsedUrl.hash = '';
+    return parsedUrl.toString().replace(/\/$/, '');
+  } catch {
+    return apiUrl.replace(/\/api\/?$/, '');
+  }
+};
+
+function QuestionSurface({ question }) {
+  if (!question) {
+    return (
+      <div className="flex h-full items-center justify-center p-8 text-center text-base-content/50">
+        Select a question to view its details.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6 p-6">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="badge badge-primary badge-outline px-4 py-3 capitalize">
+          {question.level || 'medium'}
+        </div>
+        <div className="badge badge-outline px-4 py-3">
+          {question.timer || 30} min
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-base-300 bg-base-100 p-5 shadow-sm">
+        <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-base-content/50">
+          Short Summary
+        </h3>
+        <p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-base-content/85">
+          {question.summary || 'No short summary was added for this question.'}
+        </p>
+      </div>
+
+      <div className="rounded-2xl border border-base-300 bg-base-100 p-5 shadow-sm">
+        <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-base-content/50">
+          Full Problem Statement
+        </h3>
+        <p className="mt-4 whitespace-pre-wrap text-sm leading-7 text-base-content/85">
+          {question.problemStatement || 'No detailed problem statement was added for this question.'}
+        </p>
+      </div>
+    </div>
+  );
+}
 
 function InterviewSessionPage() {
   const { identifier } = useParams();
   const navigate = useNavigate();
   const { user, isLoaded } = useUser();
 
-  // Interview and session state
   const [interview, setInterview] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [viewerRole, setViewerRole] = useState(null);
 
-  // Code editor state
   const [selectedLanguage, setSelectedLanguage] = useState('javascript');
   const [code, setCode] = useState('');
+  const [codeByQuestion, setCodeByQuestion] = useState({});
   const [output, setOutput] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
-  const [testResults, setTestResults] = useState(null);
 
-  // Questions state
   const [questions, setQuestions] = useState([]);
   const [selectedQuestionIndex, setSelectedQuestionIndex] = useState(0);
-  const [newQuestionTitle, setNewQuestionTitle] = useState('');
-  const [newQuestionTimer, setNewQuestionTimer] = useState(0);
+  const [questionDraft, setQuestionDraft] = useState(emptyDraft);
   const [isAddingQuestion, setIsAddingQuestion] = useState(false);
+  const [isStartingInterview, setIsStartingInterview] = useState(false);
+  const [isDeletingQuestionId, setIsDeletingQuestionId] = useState(null);
+  const [isRefreshingQuestions, setIsRefreshingQuestions] = useState(false);
 
-  // Timer state for current question
-  const [timeRemaining, setTimeRemaining] = useState(0);
-  const [isTimerRunning, setIsTimerRunning] = useState(false);
-
-  // Stream.io integration - SAME pattern as useStreamClient hook
   const [streamClient, setStreamClient] = useState(null);
   const [chatClient, setChatClient] = useState(null);
   const [channel, setChannel] = useState(null);
   const [call, setCall] = useState(null);
   const [isInitializingCall, setIsInitializingCall] = useState(true);
-  const [isStartingInterview, setIsStartingInterview] = useState(false);
   const initRunIdRef = useRef(0);
+  const codeSyncTimeoutRef = useRef(null);
+  const applyingRemoteCodeRef = useRef(false);
+  const socketRef = useRef(null);
+  const currentQuestionKeyRef = useRef('');
+  const selectedLanguageRef = useRef('javascript');
 
-  // Fetch interview details
+  const getQuestionKey = (question, fallbackIndex = selectedQuestionIndex) => {
+    if (question?._id) {
+      return question._id;
+    }
+
+    return `question-${fallbackIndex}`;
+  };
+
+  const applyInterviewState = (interviewData) => {
+    const nextQuestions = (interviewData.questions || []).map(normalizeQuestion);
+
+    setViewerRole(interviewData.viewerRole || null);
+    setInterview(interviewData);
+    setQuestions(nextQuestions);
+    setSelectedQuestionIndex((current) => {
+      if (nextQuestions.length === 0) {
+        return 0;
+      }
+
+      return Math.min(current, nextQuestions.length - 1);
+    });
+  };
+
   useEffect(() => {
     const fetchInterview = async () => {
       try {
         setLoading(true);
         const response = await axios.get(`/interviews/${identifier}`);
-
-        if (response.data.success) {
-          const interviewData = response.data.data;
-          console.log('📋 Fetched interview:', {
-            id: interviewData._id,
-            status: interviewData.status,
-            streamCallId: interviewData.streamCallId,
-            streamChannelId: interviewData.streamChannelId
-          });
-          setInterview(interviewData);
-          setQuestions(interviewData.questions || []);
-
-          if (interviewData.questions && interviewData.questions.length > 0) {
-            setCode(interviewData.questions[0].starterCode || '');
-          }
-        } else {
-          setError('Failed to load interview data');
+        if (!response.data.success) {
+          throw new Error('Failed to load interview data');
         }
+
+        applyInterviewState(response.data.data);
       } catch (err) {
-        const errorMsg = err.response?.data?.message || err.message || 'Failed to load interview';
-        setError(errorMsg);
-        console.error('Error fetching interview:', err);
+        setError(getApiErrorMessage(err, 'Failed to load interview'));
       } finally {
         setLoading(false);
       }
@@ -92,7 +202,34 @@ function InterviewSessionPage() {
     }
   }, [identifier, isLoaded, user]);
 
-  // Initialize Stream.io clients - SAME PATTERN AS useStreamClient hook
+  const isInterviewer = viewerRole === 'interviewer';
+  const currentQuestion = questions[selectedQuestionIndex] || null;
+  const currentQuestionKey = getQuestionKey(currentQuestion);
+
+  useEffect(() => {
+    currentQuestionKeyRef.current = currentQuestionKey;
+  }, [currentQuestionKey]);
+
+  useEffect(() => {
+    selectedLanguageRef.current = selectedLanguage;
+  }, [selectedLanguage]);
+
+  useEffect(() => {
+    const nextCode =
+      codeByQuestion[currentQuestionKey]?.[selectedLanguage] ??
+      LANGUAGE_DEFAULT_SNIPPETS[selectedLanguage] ??
+      '';
+    setCode(nextCode);
+  }, [codeByQuestion, currentQuestionKey, selectedLanguage]);
+
+  useEffect(() => {
+    return () => {
+      if (codeSyncTimeoutRef.current) {
+        window.clearTimeout(codeSyncTimeoutRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     let videoCall = null;
     let chatClientInstance = null;
@@ -100,314 +237,63 @@ function InterviewSessionPage() {
     const currentRunId = ++initRunIdRef.current;
 
     const initCall = async () => {
-      // Must have streamCallId to initialize
-      if (!interview?.streamCallId) {
-        console.log('⏳ No streamCallId yet, waiting...');
-        setIsInitializingCall(false);
-        return;
-      }
-
-      // Interview must be active
-      if (interview.status !== 'active') {
-        console.log('⏳ Interview not active yet, status:', interview.status);
+      if (!interview?.streamCallId || interview.status !== 'active') {
         setIsInitializingCall(false);
         return;
       }
 
       try {
-        console.log('🚀 Initializing Stream.io with callId:', interview.streamCallId);
+        const tokenResponse = await axios.get('/chat/token', { timeout: 15000 });
+        const { token, videoToken, userId, userName, userImage } = tokenResponse.data || {};
 
-        // Get tokens from backend with extended timeout
-        console.log('📡 Calling /chat/token endpoint...');
-        let tokenResponse;
-        try {
-          tokenResponse = await axios.get('/chat/token', { timeout: 15000 }); // Increased from default to 15s
-          console.log('📡 Token response received');
-          console.log('   Status:', tokenResponse.status);
-          console.log('   Data keys:', Object.keys(tokenResponse.data));
-          console.log('   Has token:', !!tokenResponse.data.token);
-          console.log('   Has videoToken:', !!tokenResponse.data.videoToken);
-          console.log('   Has userId:', !!tokenResponse.data.userId);
-        } catch (tokenError) {
-          console.error('❌ Failed to fetch token from API:', {
-            message: tokenError.message,
-            status: tokenError.response?.status,
-            data: tokenError.response?.data,
-            timeout: tokenError.code === 'ECONNABORTED',
-            fullResponse: tokenError.response
-          });
-          throw new Error(`Token API error (${tokenError.response?.status}): ${tokenError.response?.data?.message || tokenError.message}`);
-        }
-        
-        const tokenData = tokenResponse.data || tokenResponse;
-        console.log('📋 Parsing token data:', {
-          keys: Object.keys(tokenData),
-          hasToken: !!tokenData.token,
-          hasVideoToken: !!tokenData.videoToken,
-          hasUserId: !!tokenData.userId
-        });
-        
-        const { token, videoToken, userId, userName, userImage } = tokenData;
-        
         if (!token || !videoToken || !userId) {
-          console.error('❌ Missing token data:', {
-            token: token ? 'present' : 'MISSING',
-            videoToken: videoToken ? 'present' : 'MISSING',
-            userId: userId ? 'present' : 'MISSING',
-            fullData: tokenData
-          });
-          throw new Error(`Missing token data: token=${!!token}, videoToken=${!!videoToken}, userId=${!!userId}`);
-        }
-        
-        console.log('✅ Got Stream tokens for user:', userId);
-        console.log('🔍 Token validation:', {
-          tokenPresent: !!token,
-          tokenLength: token?.length,
-          videoTokenPresent: !!videoToken,
-          videoTokenLength: videoToken?.length,
-          userId,
-          userName
-        });
-
-        // Validate tokens before proceeding
-        if (!token || typeof token !== 'string') {
-          throw new Error(`Invalid chat token: ${typeof token}, length: ${token?.length}`);
-        }
-        if (!videoToken || typeof videoToken !== 'string') {
-          throw new Error(`Invalid video token: ${typeof videoToken}, length: ${videoToken?.length}`);
+          throw new Error('Missing Stream credentials');
         }
 
-        // Decode and validate token contents for debugging (tokens are JWTs)
-        const validateJWT = (token, name) => {
-          const parts = token.split('.');
-          if (parts.length !== 3) {
-            throw new Error(`${name} has invalid JWT structure: ${parts.length} parts instead of 3`);
-          }
-          try {
-            const payload = JSON.parse(atob(parts[1]));
-            return payload;
-          } catch (e) {
-            throw new Error(`${name} payload cannot be decoded: ${e.message}`);
-          }
-        };
-        
-        let videoTokenPayload;
-        try {
-          videoTokenPayload = validateJWT(videoToken, 'Video token');
-          console.log('✅ Video token decoded successfully:', {
-            user_id: videoTokenPayload?.user_id,
-            sub: videoTokenPayload?.sub,
-            call_cids: videoTokenPayload?.call_cids,
-            role: videoTokenPayload?.role || 'default',
-            iat: videoTokenPayload?.iat ? new Date(videoTokenPayload.iat * 1000).toISOString() : 'N/A',
-            exp: videoTokenPayload?.exp ? new Date(videoTokenPayload.exp * 1000).toISOString() : 'N/A'
-          });
-        } catch (decodeError) {
-          console.error('❌ Failed to decode video token:', decodeError.message);
-          throw decodeError;
-        }
-
-        // Check for token expiration or mismatch
-        if (!videoTokenPayload.user_id && !videoTokenPayload.sub) {
-          throw new Error('Video token has no user_id or sub claim - cannot identify user');
-        }
-        if (!videoTokenPayload.call_cids) {
-          console.warn('⚠️ Video token missing call_cids - may not work');
-        }
-
-        // Initialize Stream Video client with VIDEO token (using same lib/stream.js pattern)
-        console.log('📹 Initializing Stream video client...');
         const client = await initializeStreamClient(
-          {
-            id: userId,
-            name: userName,
-            image: userImage,
-          },
+          { id: userId, name: userName, image: userImage },
           videoToken
         );
         if (isCancelled || initRunIdRef.current !== currentRunId) return;
-        console.log('✅ StreamVideoClient initialized');
-        console.log('   Client exists:', !!client);
-        console.log('   Client.user:', client?.user);
-        console.log('   Client.userId:', client?.userId);
-
         setStreamClient(client);
-        
-        // Give client extra time to fully settle
-        console.log('⏳ Waiting 500ms for client to settle...');
-        await new Promise(resolve => setTimeout(resolve, 500));
 
-        // Initialize Stream Chat client with CHAT token BEFORE joining call
-        const apiKey = import.meta.env.VITE_STREAM_API_KEY;
-        chatClientInstance = StreamChat.getInstance(apiKey);
-
-        console.log('🔗 Connecting chat client with token...');
-        try {
-          await chatClientInstance.connectUser(
-            {
-              id: userId,
-              name: userName,
-              image: userImage,
-            },
-            token
-          );
-          if (isCancelled || initRunIdRef.current !== currentRunId) {
-            await chatClientInstance.disconnectUser().catch(() => {});
-            return;
-          }
-          setChatClient(chatClientInstance);
-          console.log('✅ Chat client connected successfully and token verified');
-        } catch (chatError) {
-          console.error('❌ Failed to connect chat client:', {
-            message: chatError.message,
-            code: chatError.code,
-            token: token ? `${token.substring(0, 20)}...` : 'MISSING'
-          });
-          throw new Error(`Chat connection failed: ${chatError.message}`);
-        }
-
-        // Add a small delay to ensure chat client is fully connected
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Now join the video call AFTER chat is fully connected
-        console.log('📞 Preparing to join video call:', interview.streamCallId);
-        console.log('🔐 Pre-join validation:', {
-          hasClient: !!client,
-          clientUserId: client?.user?.id,
-          requestedUserId: userId,
-          userIdMatch: client?.user?.id === userId,
-          tokenLength: videoToken?.length
-        });
-        
-        // Ensure client exists
-        if (!client) {
-          throw new Error('StreamVideoClient is not initialized');
-        }
-        
-        // Don't check user.id here - let the SDK initialize it during join
-        console.log('📊 Ready to join - client state:', {
-          clientExists: !!client,
-          userId: client?.user?.id,
-          callId: interview.streamCallId,
-        });
-        
-        videoCall = client.call('default', interview.streamCallId);
-        console.log('📞 Call object created, attempting to join...');
-        
-        try {
-          console.log('📞 Joining call with 30s timeout...');
-          
-          // Wrap join with timeout to catch hanging connections
-          const joinPromise = videoCall.join({ create: true });
-          
-          const joinWithTimeout = Promise.race([
-            joinPromise,
-            new Promise((_, reject) => {
-              const timeoutId = setTimeout(() => {
-                reject(new Error('Video call join timed out after 30s - possible WebSocket connection issue'));
-              }, 30000);
-              
-              // Clear timeout if join completes
-              joinPromise.finally(() => clearTimeout(timeoutId));
-            })
-          ]);
-          
-          await joinWithTimeout;
-          if (isCancelled || initRunIdRef.current !== currentRunId) {
-            await videoCall.leave().catch(() => {});
-            return;
-          }
-          setCall(videoCall);
-          console.log('✅ Successfully joined video call:', interview.streamCallId);
-          
-        } catch (joinError) {
-          console.error('❌ FAILED TO JOIN VIDEO CALL');
-          
-          // Detailed error logging for different failure types
-          const isWebSocketError = joinError.message?.includes('SFU WS connection') || 
-                                   joinError.message?.includes('WebSocket') ||
-                                   joinError.message?.includes('connection failed');
-          
-          console.error('Error Details:', {
-            message: joinError.message,
-            code: joinError.code,
-            stack: joinError.stack,
-            type: isWebSocketError ? 'WebSocket Connection' : 'Other',
-            timestamp: new Date().toISOString()
-          });
-          
-          console.error('Context:', {
-            callId: interview.streamCallId,
-            userId: userId,
-            clientUserId: client?.user?.id,
-            clientInitialized: !!client,
-            clientAuthenticated: client?.state?.isAuthenticated,
-            clientType: client?.constructor?.name,
-          });
-          
-          // Provide actionable suggestions for WebSocket errors
-          if (isWebSocketError) {
-            console.error('🔍 WebSocket Connection Issue Detected:');
-            console.error('   - Check your internet connection');
-            console.error('   - Verify Stream.io API key is correct');
-            console.error('   - Check if firewall blocks WebSocket (WSS) connections');
-            console.error('   - Try refreshing the page and joining again');
-          }
-          
-          throw joinError;
-        }
-
-        // Watch chat channel - user should be a member from join endpoint
-        console.log('💬 Watching chat channel:', interview.streamChannelId);
-        const chatChannel = chatClientInstance.channel('messaging', interview.streamChannelId);
-        
-        try {
-          await chatChannel.watch();
-          if (isCancelled || initRunIdRef.current !== currentRunId) return;
-          setChannel(chatChannel);
-          console.log('✅ Watching chat channel:', interview.streamChannelId);
-        } catch (watchError) {
-          setChannel(null);
-          console.error('❌ Failed to watch channel:', {
-            message: watchError.message,
-            code: watchError.code,
-            channelId: interview.streamChannelId,
-            userId: userId
-          });
-          toast.error('Chat is unavailable for this interview');
-        }
-
-        toast.success('Connected to video call!');
-      } catch (error) {
+        chatClientInstance = StreamChat.getInstance(import.meta.env.VITE_STREAM_API_KEY);
+        await chatClientInstance.connectUser(
+          { id: userId, name: userName, image: userImage },
+          token
+        );
         if (isCancelled || initRunIdRef.current !== currentRunId) {
+          await chatClientInstance.disconnectUser().catch(() => {});
           return;
         }
-        const errorMsg = error?.message || String(error);
-        const isWSError = errorMsg.includes('WS') || 
-                          errorMsg.includes('WebSocket') || 
-                          errorMsg.includes('connection could not');
-        
-        console.error('❌ Error initializing Stream:', error);
-        console.error('   Message:', errorMsg);
-        console.error('   WebSocket Issue:', isWSError);
-        
-        // Show detailed error to user
-        const displayMsg = isWSError 
-          ? 'WebSocket connection failed - check your internet and firewall settings'
-          : 'Failed to join video call';
-        
-        toast.error(displayMsg);
-        
-        // Log diagnostic suggestions
-        if (errorMsg.includes('initial WS connection')) {
-          console.error('\n⚠️ WebSocket Connection Could Not Be Established');
-          console.error('   This usually means:');
-          console.error('   1. Firewall or proxy is blocking WebSocket connections');
-          console.error('   2. Network is unreliable or offline');
-          console.error('   3. Stream.io service is unavailable');
-          console.error('   4. Invalid or expired token');
-          console.error('\n   Try: Refresh page, check internet, disable VPN/proxy');
+        setChatClient(chatClientInstance);
+
+        videoCall = client.call('default', interview.streamCallId);
+        await videoCall.join({ create: true });
+        if (isCancelled || initRunIdRef.current !== currentRunId) {
+          await videoCall.leave().catch(() => {});
+          return;
         }
+        setCall(videoCall);
+
+        const chatChannel = chatClientInstance.channel('messaging', interview.streamChannelId);
+        try {
+          await chatChannel.watch();
+          if (!isCancelled && initRunIdRef.current === currentRunId) {
+            setChannel(chatChannel);
+          }
+        } catch (watchError) {
+          console.error('Chat watch failed:', watchError);
+          setChannel(null);
+          toast.error('Chat is unavailable for this interview');
+        }
+      } catch (streamError) {
+        console.error('Stream init error:', streamError);
+        toast.error(streamError?.message || 'Failed to join video call');
+        setStreamClient(null);
+        setChatClient(null);
+        setChannel(null);
+        setCall(null);
       } finally {
         if (!isCancelled && initRunIdRef.current === currentRunId) {
           setIsInitializingCall(false);
@@ -419,7 +305,6 @@ function InterviewSessionPage() {
       initCall();
     }
 
-    // Cleanup
     return () => {
       isCancelled = true;
       (async () => {
@@ -427,110 +312,225 @@ function InterviewSessionPage() {
           if (videoCall) await videoCall.leave();
           if (chatClientInstance) await chatClientInstance.disconnectUser();
           await disconnectStreamClient();
-        } catch (error) {
-          console.error('Cleanup error:', error);
+        } catch (cleanupError) {
+          console.error('Cleanup error:', cleanupError);
         }
       })();
     };
   }, [interview, loading]);
 
-  // Timer effect for current question
-  useEffect(() => {
-    const currentQuestion = questions[selectedQuestionIndex];
-    if (currentQuestion?.timeLimit) {
-      setTimeRemaining(currentQuestion.timeLimit * 60);
-      setIsTimerRunning(true);
-    } else {
-      setTimeRemaining(0);
-      setIsTimerRunning(false);
+  const refreshInterview = async (nextInterview = null) => {
+    if (nextInterview) {
+      applyInterviewState(nextInterview);
+      return;
     }
-  }, [selectedQuestionIndex, questions]);
 
-  // Countdown timer
+    const response = await axios.get(`/interviews/${identifier}`);
+    if (response.data.success) {
+      applyInterviewState(response.data.data);
+    }
+  };
+
+  const broadcastCodeChange = (nextCode, nextLanguage = selectedLanguage) => {
+    if (!socketRef.current || !interview?._id || !currentQuestionKey || !nextLanguage) {
+      return;
+    }
+
+    if (applyingRemoteCodeRef.current) {
+      return;
+    }
+
+    if (codeSyncTimeoutRef.current) {
+      window.clearTimeout(codeSyncTimeoutRef.current);
+    }
+
+    codeSyncTimeoutRef.current = window.setTimeout(async () => {
+      try {
+        socketRef.current.emit('code:sync', {
+          interviewId: interview._id,
+          questionKey: currentQuestionKey,
+          language: nextLanguage,
+          code: nextCode,
+        });
+      } catch (syncError) {
+        console.error('Code sync failed:', syncError);
+      }
+    }, 180);
+  };
+
+  const handleCodeChange = (value) => {
+    const nextCode = value || '';
+
+    setCode(nextCode);
+    setCodeByQuestion((current) => ({
+      ...current,
+      [currentQuestionKey]: {
+        ...(current[currentQuestionKey] || {}),
+        [selectedLanguage]: nextCode,
+      },
+    }));
+
+    broadcastCodeChange(nextCode, selectedLanguage);
+  };
+
+  const handleLanguageChange = (event) => {
+    const nextLanguage = event.target.value;
+    setSelectedLanguage(nextLanguage);
+    setOutput(null);
+
+    const nextCode =
+      codeByQuestion[currentQuestionKey]?.[nextLanguage] ??
+      LANGUAGE_DEFAULT_SNIPPETS[nextLanguage] ??
+      '';
+    broadcastCodeChange(nextCode, nextLanguage);
+  };
+
   useEffect(() => {
-    if (!isTimerRunning || timeRemaining <= 0) return;
+    if (!interview?._id || !user?.id) {
+      return undefined;
+    }
 
-    const interval = setInterval(() => {
-      setTimeRemaining((prev) => {
-        if (prev <= 1) {
-          setIsTimerRunning(false);
-          toast.error('Time is up for this question!');
-          return 0;
-        }
-        return prev - 1;
+    const socket = io(getSocketServerUrl(), {
+      transports: ['websocket', 'polling'],
+      withCredentials: true,
+    });
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      socket.emit('interview:join', {
+        interviewId: interview._id,
+        userId: user.id,
+        userName: user.fullName || user.username || user.primaryEmailAddress?.emailAddress || 'User',
+        role: isInterviewer ? 'interviewer' : 'candidate',
       });
-    }, 1000);
+    });
 
-    return () => clearInterval(interval);
-  }, [isTimerRunning, timeRemaining]);
+    socket.on('code:state', (payload) => {
+      if (!payload || payload.interviewId !== interview._id || !payload.codes) {
+        return;
+      }
+
+      applyingRemoteCodeRef.current = true;
+      setCodeByQuestion(payload.codes);
+      window.setTimeout(() => {
+        applyingRemoteCodeRef.current = false;
+      }, 0);
+    });
+
+    socket.on('code:update', (payload) => {
+      if (!payload || payload.interviewId !== interview._id || payload.userId === user.id) {
+        return;
+      }
+
+      const remoteQuestionKey = payload.questionKey;
+      const nextLanguage = payload.language || 'javascript';
+      const nextCode = payload.code || '';
+
+      applyingRemoteCodeRef.current = true;
+      setCodeByQuestion((current) => ({
+        ...current,
+        [remoteQuestionKey]: {
+          ...(current[remoteQuestionKey] || {}),
+          [nextLanguage]: nextCode,
+        },
+      }));
+
+      if (remoteQuestionKey === currentQuestionKeyRef.current && nextLanguage === selectedLanguageRef.current) {
+        setCode(nextCode);
+      }
+
+      window.setTimeout(() => {
+        applyingRemoteCodeRef.current = false;
+      }, 0);
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [interview?._id, isInterviewer, user]);
+
+  const handleReloadQuestions = async () => {
+    try {
+      setIsRefreshingQuestions(true);
+      await refreshInterview();
+      toast.success('Questions refreshed');
+    } catch (refreshError) {
+      toast.error(getApiErrorMessage(refreshError, 'Failed to refresh questions'));
+    } finally {
+      setIsRefreshingQuestions(false);
+    }
+  };
 
   const handleRunCode = async () => {
     setIsRunning(true);
     setOutput(null);
-    setTestResults(null);
-
     try {
       const result = await executeCode(selectedLanguage, code);
       setOutput(result);
-
-      if (questions[selectedQuestionIndex]?.testCases) {
-        runTestCases(result);
-      }
-    } catch (err) {
-      setOutput({ error: 'Execution failed' });
+    } catch (runError) {
+      setOutput({ success: false, error: runError.message || 'Execution failed' });
     } finally {
       setIsRunning(false);
     }
   };
 
-  const runTestCases = async (executionResult) => {
-    const question = questions[selectedQuestionIndex];
-    if (!question?.testCases) return;
-
-    try {
-      const results = [];
-      for (const testCase of question.testCases) {
-        const passed = executionResult.output?.includes(testCase.expectedOutput);
-        results.push({
-          input: testCase.input,
-          expected: testCase.expectedOutput,
-          passed,
-          status: passed ? 'PASSED' : 'FAILED'
-        });
-      }
-      setTestResults(results);
-    } catch (err) {
-      console.error('Error running tests:', err);
-    }
-  };
-
   const handleAddQuestion = async () => {
-    if (!newQuestionTitle.trim()) {
+    if (!questionDraft.title.trim()) {
       toast.error('Question title is required');
+      return;
+    }
+
+    if (!questionDraft.summary.trim()) {
+      toast.error('Short question summary is required');
+      return;
+    }
+
+    if (!questionDraft.problemStatement.trim()) {
+      toast.error('Full problem statement is required');
       return;
     }
 
     try {
       setIsAddingQuestion(true);
-      const response = await axios.post(`/interviews/${interview._id}/questions`, {
-        title: newQuestionTitle,
-        description: '',
-        difficulty: 'medium',
-        timeLimit: newQuestionTimer || 0,
-        language: 'javascript'
-      });
+      const payload = {
+        title: questionDraft.title.trim(),
+        summary: questionDraft.summary.trim(),
+        level: questionDraft.level,
+        problemStatement: questionDraft.problemStatement.trim(),
+        timer: questionDraft.timer,
+      };
 
-      if (response.data.success) {
-        setQuestions(response.data.data.questions || []);
-        setNewQuestionTitle('');
-        setNewQuestionTimer(0);
-        toast.success('Question added successfully!');
+      const response = await axios.post(`/interviews/${interview._id}/questions`, payload);
+      if (!response.data.success) {
+        throw new Error(response.data.message || 'Failed to add question');
       }
-    } catch (err) {
-      toast.error('Failed to add question');
-      console.error('Error adding question:', err);
+
+      const updatedInterview = response.data.data;
+      await refreshInterview(updatedInterview);
+      setQuestionDraft(emptyDraft);
+      setSelectedQuestionIndex((updatedInterview.questions || []).length - 1);
+      toast.success('Question added successfully');
+    } catch (addError) {
+      toast.error(getApiErrorMessage(addError, 'Failed to add question'));
     } finally {
       setIsAddingQuestion(false);
+    }
+  };
+
+  const handleDeleteQuestion = async (questionId) => {
+    try {
+      setIsDeletingQuestionId(questionId);
+      const response = await axios.delete(`/interviews/${interview._id}/questions/${questionId}`);
+      if (!response.data.success) {
+        throw new Error(response.data.message || 'Failed to delete question');
+      }
+      await refreshInterview(response.data.data);
+      toast.success('Question deleted');
+    } catch (deleteError) {
+      toast.error(getApiErrorMessage(deleteError, 'Failed to delete question'));
+    } finally {
+      setIsDeletingQuestionId(null);
     }
   };
 
@@ -538,14 +538,13 @@ function InterviewSessionPage() {
     try {
       setIsStartingInterview(true);
       const response = await axios.post(`/interviews/${interview._id}/start`);
-
-      if (response.data.success) {
-        setInterview(response.data.data);
-        toast.success('Interview started successfully!');
+      if (!response.data.success) {
+        throw new Error('Failed to start interview');
       }
-    } catch (err) {
-      toast.error('Failed to start interview');
-      console.error('Error starting interview:', err);
+      await refreshInterview(response.data.data);
+      toast.success('Interview started successfully');
+    } catch (startError) {
+      toast.error(getApiErrorMessage(startError, 'Failed to start interview'));
     } finally {
       setIsStartingInterview(false);
     }
@@ -554,47 +553,36 @@ function InterviewSessionPage() {
   const handleEndInterview = async () => {
     try {
       const response = await axios.post(`/interviews/${interview._id}/end`);
-
-      if (response.data.success) {
-        toast.success('Interview ended successfully!');
-        setTimeout(() => navigate('/dashboard'), 1500);
+      if (!response.data.success) {
+        throw new Error('Failed to end interview');
       }
-    } catch (err) {
-      toast.error('Failed to end interview');
-      console.error('Error ending interview:', err);
+      toast.success('Interview ended successfully');
+      setTimeout(() => navigate('/dashboard'), 1200);
+    } catch (endError) {
+      toast.error(getApiErrorMessage(endError, 'Failed to end interview'));
     }
   };
 
   if (!isLoaded) {
     return (
-      <div className="min-h-screen bg-base-100 flex items-center justify-center">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      <div className="min-h-screen flex items-center justify-center bg-base-100">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
       </div>
     );
   }
 
   if (!user) {
-    return (
-      <div className="min-h-screen bg-base-100">
-        <Navbar />
-        <div className="container mx-auto px-6 py-12 flex items-center justify-center">
-          <div className="card bg-base-200 shadow-xl p-8 max-w-md w-full">
-            <h2 className="text-2xl font-bold mb-4">Sign In Required</h2>
-            <p className="text-base-content/70 mb-6">Please sign in to access interview sessions.</p>
-          </div>
-        </div>
-      </div>
-    );
+    return null;
   }
 
   if (loading) {
     return (
       <div className="min-h-screen bg-base-100">
         <Navbar />
-        <div className="container mx-auto px-6 py-12 flex items-center justify-center">
-          <div className="flex flex-col items-center gap-4">
-            <Loader2 className="w-8 h-8 animate-spin text-primary" />
-            <p className="text-base-content/70">Loading interview...</p>
+        <div className="flex h-[calc(100vh-64px)] items-center justify-center">
+          <div className="text-center">
+            <Loader2 className="mx-auto h-10 w-10 animate-spin text-primary" />
+            <p className="mt-4 text-base-content/70">Loading interview room...</p>
           </div>
         </div>
       </div>
@@ -605,57 +593,43 @@ function InterviewSessionPage() {
     return (
       <div className="min-h-screen bg-base-100">
         <Navbar />
-        <div className="container mx-auto px-6 py-12 flex items-center justify-center">
-          <div className="card bg-base-200 shadow-xl p-8 max-w-md w-full">
-            <h2 className="text-2xl font-bold mb-4 text-error">Error</h2>
-            <p className="text-base-content/70 mb-6">{error || 'Interview not found'}</p>
-            <button onClick={() => navigate('/dashboard')} className="btn btn-primary w-full">
-              Back to Dashboard
-            </button>
+        <div className="flex h-[calc(100vh-64px)] items-center justify-center px-6">
+          <div className="w-full max-w-md rounded-3xl border border-base-300 bg-base-100 p-8 shadow-xl">
+            <h2 className="text-2xl font-bold text-error">Error</h2>
+            <p className="mt-3 text-base-content/70">{error || 'Interview not found'}</p>
           </div>
         </div>
       </div>
     );
   }
 
-  const currentQuestion = questions[selectedQuestionIndex];
-
-  // Show start interview screen if interview hasn't started
-  if (interview && interview.status !== 'active') {
+  if (interview.status !== 'active') {
     return (
       <div className="h-screen bg-base-100 flex flex-col overflow-hidden">
         <Navbar />
-        <div className="flex-1 flex items-center justify-center">
-          <div className="card bg-base-200 shadow-xl p-12 max-w-md w-full text-center">
-            <div className="w-20 h-20 rounded-full bg-primary/10 mx-auto mb-6 flex items-center justify-center">
-              <span className="text-4xl">🎥</span>
+        <div className="flex flex-1 items-center justify-center p-6">
+          <div className="w-full max-w-xl rounded-[2rem] border border-base-300 bg-gradient-to-br from-base-100 to-base-200 p-10 text-center shadow-2xl">
+            <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-3xl bg-primary/10 text-primary">
+              <FilePlus2 className="h-10 w-10" />
             </div>
-            <h2 className="text-3xl font-bold mb-4">{interview.title}</h2>
-            <p className="text-base-content/70 mb-2">{interview.description}</p>
-            <p className="text-sm text-base-content/50 mb-8">Status: <span className="font-semibold capitalize">{interview.status}</span></p>
-            
-            {interview.status === 'draft' && (
+            <h2 className="mt-6 text-3xl font-black">{interview.title}</h2>
+            <p className="mt-3 text-base-content/70">{interview.description}</p>
+            <p className="mt-4 text-sm text-base-content/50">
+              Status: <span className="font-semibold capitalize">{interview.status}</span>
+            </p>
+            {isInterviewer ? (
               <button
                 onClick={handleStartInterview}
                 disabled={isStartingInterview}
-                className="btn btn-primary btn-lg w-full gap-2"
+                className="btn btn-primary btn-lg mt-8 w-full gap-2"
               >
-                {isStartingInterview ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    Starting...
-                  </>
-                ) : (
-                  <>
-                    <Play className="w-5 h-5" />
-                    Start Interview
-                  </>
-                )}
+                {isStartingInterview ? <Loader2 className="h-5 w-5 animate-spin" /> : <Play className="h-5 w-5" />}
+                {isStartingInterview ? 'Starting...' : 'Start Interview'}
               </button>
-            )}
-            
-            {interview.status !== 'draft' && (
-              <p className="text-sm text-base-content/60">This interview cannot be started in its current state.</p>
+            ) : (
+              <p className="mt-8 text-sm text-base-content/60">
+                Waiting for the interviewer to start the session.
+              </p>
             )}
           </div>
         </div>
@@ -667,200 +641,242 @@ function InterviewSessionPage() {
     <div className="h-screen bg-base-100 flex flex-col">
       <Navbar />
 
-      <div className="flex-1">
+      <div className="flex-1 min-h-0">
         <PanelGroup direction="horizontal">
-          {/* LEFT PANEL - Questions List */}
-          <Panel defaultSize={30} minSize={25}>
-            <div className="h-full overflow-y-auto bg-base-200">
-            <div className="p-4 bg-base-100 border-b border-base-300">
-              <h3 className="font-bold text-lg">📚 Problems ({questions.length})</h3>
-            </div>
-            <div className="p-3 space-y-2">
-              {questions.map((q, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => {
-                    setSelectedQuestionIndex(idx);
-                    setCode(q.starterCode || '');
-                    setOutput(null);
-                    setTestResults(null);
-                  }}
-                  className={`w-full text-left px-4 py-3 rounded-lg font-medium transition ${
-                    selectedQuestionIndex === idx
-                      ? 'bg-primary text-primary-content'
-                      : 'bg-base-100 hover:bg-base-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="truncate flex-1">{q.title}</span>
-                    {q.timeLimit > 0 && (
-                      <span className={`badge badge-sm ml-2 ${
-                        selectedQuestionIndex === idx ? 'badge-primary-content' : 'badge-warning'
-                      }`}>
-                        ⏱ {q.timeLimit}m
-                      </span>
-                    )}
+          <Panel defaultSize={34} minSize={24}>
+            <div className="flex h-full min-h-0 flex-col border-r border-base-300 bg-gradient-to-b from-base-100 to-base-200">
+              <div className="border-b border-base-300 px-5 py-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.25em] text-base-content/45">
+                      Question Workspace
+                    </p>
+                    <h2 className="mt-2 text-xl font-bold text-base-content">
+                      {currentQuestion?.title || 'Interview Questions'}
+                    </h2>
                   </div>
-                </button>
-              ))}
-            </div>
+                  <div className="badge badge-outline badge-lg">
+                    {isInterviewer ? 'Interviewer' : 'Candidate'}
+                  </div>
+                </div>
 
-            {/* Add Question Form */}
-            <div className="p-3 bg-base-100 border-t border-base-300 space-y-2">
-              <input
-                type="text"
-                value={newQuestionTitle}
-                onChange={(e) => setNewQuestionTitle(e.target.value)}
-                placeholder="Add new problem..."
-                className="input input-bordered input-sm w-full"
-              />
-              <div className="flex gap-2">
-                <input
-                  type="number"
-                  min="0"
-                  max="120"
-                  value={newQuestionTimer}
-                  onChange={(e) => setNewQuestionTimer(Math.max(0, parseInt(e.target.value) || 0))}
-                  placeholder="Timer (min)"
-                  className="input input-bordered input-sm flex-1"
-                />
-                <button
-                  onClick={handleAddQuestion}
-                  disabled={isAddingQuestion}
-                  className="btn btn-success btn-sm"
-                >
-                  {isAddingQuestion ? '...' : '+ Add'}
-                </button>
+                {!isInterviewer && (
+                  <div className="mt-4">
+                    <button
+                      onClick={handleReloadQuestions}
+                      disabled={isRefreshingQuestions}
+                      className="btn btn-outline btn-sm gap-2"
+                    >
+                      {isRefreshingQuestions ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCcw className="h-4 w-4" />
+                      )}
+                      Reload New Questions
+                    </button>
+                  </div>
+                )}
+
+                <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
+                  {questions.map((question, index) => (
+                    <button
+                      key={question._id || index}
+                      onClick={() => setSelectedQuestionIndex(index)}
+                      className={`flex min-w-[92px] shrink-0 items-center justify-center gap-2 rounded-2xl border px-4 py-2 text-sm font-semibold transition ${
+                        selectedQuestionIndex === index
+                          ? 'border-primary bg-primary text-primary-content'
+                          : 'border-base-300 bg-base-100 text-base-content hover:border-primary/40 hover:bg-base-200'
+                      }`}
+                    >
+                      <span>{index + 1}</span>
+                      <FileText className="h-4 w-4" />
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
-          </div>
-        </Panel>
 
-        <PanelResizeHandle className="w-2 bg-base-300 hover:bg-primary transition-colors cursor-col-resize" />
+              <div className="min-h-0 flex-1 overflow-auto bg-base-200">
+                {currentQuestion ? (
+                  <QuestionSurface question={currentQuestion} />
+                ) : (
+                  <div className="flex h-full items-center justify-center p-8 text-center text-base-content/55">
+                    No question added yet.
+                  </div>
+                )}
+              </div>
 
-        {/* MIDDLE PANEL - Code Editor */}
-        <Panel defaultSize={45} minSize={30}>
-          <div className="h-full flex flex-col bg-base-200">
-                  {currentQuestion ? (
-                    <>
-                      {/* Question Header */}
-                      <div className="p-4 bg-base-100 border-b border-base-300">
-                        <div className="flex items-center justify-between mb-2">
-                          <h2 className="font-bold text-xl">{currentQuestion.title}</h2>
-                          <div className="flex gap-2 items-center">
-                            {currentQuestion.timeLimit > 0 && (
-                              <span className={`badge ${
-                                timeRemaining > 60 ? 'badge-info' :
-                                timeRemaining > 0 ? 'badge-warning' : 'badge-error'
-                              }`}>
-                                ⏱ {Math.floor(timeRemaining / 60)}:{String(timeRemaining % 60).padStart(2, '0')}
-                              </span>
-                            )}
-                            <span className={`badge ${
-                              currentQuestion.difficulty === 'easy' ? 'badge-success' :
-                              currentQuestion.difficulty === 'medium' ? 'badge-warning' : 'badge-error'
-                            }`}>
-                              {currentQuestion.difficulty}
-                            </span>
-                          </div>
-                        </div>
-                        {currentQuestion.description && (
-                          <p className="text-base-content/70 text-sm">{currentQuestion.description}</p>
-                        )}
+              {isInterviewer && (
+                <div className="border-t border-base-300 bg-base-100 p-4">
+                  <div className="rounded-3xl border border-base-300 bg-base-100 p-4 shadow-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h3 className="font-bold text-base-content">Add Question</h3>
+                        <p className="text-xs text-base-content/55">
+                          Keep it simple: title, level, timer, summary, and full statement.
+                        </p>
                       </div>
+                      <button
+                        onClick={handleAddQuestion}
+                        disabled={isAddingQuestion}
+                        className="btn btn-primary btn-sm gap-2"
+                      >
+                        {isAddingQuestion ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                        Add
+                      </button>
+                    </div>
 
-                      {/* Language & Run */}
-                      <div className="p-3 bg-base-100 border-b border-base-300 flex items-center justify-between">
+                    <div className="mt-4 grid gap-3">
+                      <input
+                        value={questionDraft.title}
+                        onChange={(event) => setQuestionDraft((current) => ({ ...current, title: event.target.value }))}
+                        className="input input-bordered w-full"
+                        placeholder="Question title"
+                      />
+
+                      <div className="grid grid-cols-2 gap-3">
                         <select
-                          value={selectedLanguage}
-                          onChange={(e) => {
-                            setSelectedLanguage(e.target.value);
-                            setOutput(null);
-                          }}
-                          className="select select-bordered select-sm"
+                          value={questionDraft.level}
+                          onChange={(event) => setQuestionDraft((current) => ({ ...current, level: event.target.value }))}
+                          className="select select-bordered w-full"
                         >
-                          <option value="javascript">JavaScript</option>
-                          <option value="python">Python</option>
-                          <option value="java">Java</option>
-                          <option value="cpp">C++</option>
+                          <option value="easy">Easy</option>
+                          <option value="medium">Medium</option>
+                          <option value="hard">Hard</option>
                         </select>
-                        <button
-                          onClick={handleRunCode}
-                          disabled={isRunning}
-                          className="btn btn-success btn-sm gap-2"
-                        >
-                          <Play className="w-4 h-4" />
-                          {isRunning ? 'Running...' : 'Run Code'}
-                        </button>
-                      </div>
-
-                      {/* Code Editor */}
-                      <div className="flex-1 overflow-hidden">
-                        <CodeEditorPanel
-                          code={code}
-                          setCode={setCode}
-                          language={selectedLanguage}
+                        <input
+                          type="number"
+                          min="1"
+                          max="180"
+                          value={questionDraft.timer}
+                          onChange={(event) =>
+                            setQuestionDraft((current) => ({
+                              ...current,
+                              timer: Math.max(1, Number(event.target.value) || 30),
+                            }))
+                          }
+                          className="input input-bordered w-full"
+                          placeholder="Timer (min)"
                         />
                       </div>
-                    </>
-                  ) : (
-                    <div className="flex-1 flex items-center justify-center">
-                      <p className="text-base-content/60">Select a problem to start coding</p>
-                    </div>
-                  )}
-          </div>
-        </Panel>
 
-        <PanelResizeHandle className="w-2 bg-base-300 hover:bg-primary transition-colors cursor-col-resize" />
+                      <textarea
+                        value={questionDraft.summary}
+                        onChange={(event) => setQuestionDraft((current) => ({ ...current, summary: event.target.value }))}
+                        className="textarea textarea-bordered min-h-24 w-full"
+                        placeholder="Short question summary"
+                      />
 
-        {/* RIGHT PANEL - Video Call & Chat */}
-        <Panel defaultSize={25} minSize={20}>
-          <div className="h-full bg-base-100 border-l border-base-300 flex flex-col">
-            {/* Video Call Header */}
-            <div className="px-4 py-3 border-b border-base-300 bg-gradient-to-r from-primary/20 to-transparent flex items-center justify-between">
-              <h2 className="font-bold text-base-content">🎥 Video Call</h2>
-              <button
-                onClick={handleEndInterview}
-                className="btn btn-error btn-xs gap-1"
-                title="End the interview session"
-              >
-                End Interview
-              </button>
-            </div>
-
-            {/* Video Call Area */}
-            <div className="flex-1 overflow-hidden">
-              {isInitializingCall ? (
-                <div className="h-full flex items-center justify-center bg-base-200">
-                  <div className="text-center">
-                    <Loader2Icon className="w-12 h-12 mx-auto animate-spin text-primary mb-4" />
-                    <p className="text-lg">Connecting to video call...</p>
-                  </div>
-                </div>
-              ) : !streamClient || !call ? (
-                <div className="h-full flex items-center justify-center bg-base-200">
-                  <div className="card bg-base-100 shadow-xl max-w-sm mx-4">
-                    <div className="card-body items-center text-center">
-                      <div className="w-16 h-16 bg-error/10 rounded-full flex items-center justify-center mb-4">
-                        <PhoneOffIcon className="w-8 h-8 text-error" />
-                      </div>
-                      <h2 className="card-title text-lg">Connection Failed</h2>
-                      <p className="text-sm text-base-content/70">Unable to connect to video call</p>
+                      <textarea
+                        value={questionDraft.problemStatement}
+                        onChange={(event) => setQuestionDraft((current) => ({ ...current, problemStatement: event.target.value }))}
+                        className="textarea textarea-bordered min-h-36 w-full"
+                        placeholder="Full problem statement"
+                      />
                     </div>
                   </div>
-                </div>
-              ) : (
-                <div className="h-full">
-                  <StreamVideo client={streamClient}>
-                    <StreamCall call={call}>
-                      <VideoCallUI key="session-video-call" chatClient={chatClient} channel={channel} userRole="interviewer" />
-                    </StreamCall>
-                  </StreamVideo>
                 </div>
               )}
             </div>
-          </div>
-        </Panel>
+          </Panel>
+
+          <PanelResizeHandle className="w-2 bg-base-300 hover:bg-primary transition-colors cursor-col-resize" />
+
+          <Panel defaultSize={41} minSize={28}>
+            <div className="flex h-full min-h-0 flex-col bg-base-200">
+              <div className="border-b border-base-300 bg-base-100 px-5 py-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-bold text-base-content">
+                      {currentQuestion?.title || 'Code Workspace'}
+                    </h3>
+                    <p className="text-sm text-base-content/60">
+                      Use the prompt on the left and code your solution here.
+                    </p>
+                  </div>
+                  {isInterviewer && currentQuestion?._id && (
+                    <button
+                      onClick={() => handleDeleteQuestion(currentQuestion._id)}
+                      disabled={isDeletingQuestionId === currentQuestion._id}
+                      className="btn btn-ghost btn-sm text-error"
+                    >
+                      {isDeletingQuestionId === currentQuestion._id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4" />
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <PanelGroup direction="vertical" className="flex-1 min-h-0">
+                <Panel defaultSize={68} minSize={35}>
+                  <CodeEditorPanel
+                    selectedLanguage={selectedLanguage}
+                    code={code}
+                    isRunning={isRunning}
+                    onLanguageChange={handleLanguageChange}
+                    onCodeChange={handleCodeChange}
+                    onRunCode={handleRunCode}
+                    availableLanguages={['javascript', 'python', 'java']}
+                  />
+                </Panel>
+
+                <PanelResizeHandle className="h-2 bg-base-300 hover:bg-primary transition-colors cursor-row-resize" />
+
+                <Panel defaultSize={32} minSize={18}>
+                  <OutputPanel output={output} />
+                </Panel>
+              </PanelGroup>
+            </div>
+          </Panel>
+
+          <PanelResizeHandle className="w-2 bg-base-300 hover:bg-primary transition-colors cursor-col-resize" />
+
+          <Panel defaultSize={25} minSize={20}>
+            <div className="flex h-full min-h-0 flex-col border-l border-base-300 bg-base-100">
+              <div className="flex items-center justify-between border-b border-base-300 bg-gradient-to-r from-primary/20 to-transparent px-4 py-3">
+                <h2 className="font-bold text-base-content">Live Interview</h2>
+                {isInterviewer && (
+                  <button onClick={handleEndInterview} className="btn btn-error btn-xs">
+                    End Interview
+                  </button>
+                )}
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-hidden">
+                {isInitializingCall ? (
+                  <div className="flex h-full items-center justify-center bg-base-200">
+                    <div className="text-center">
+                      <Loader2Icon className="mx-auto mb-4 h-10 w-10 animate-spin text-primary" />
+                      <p className="text-base-content/70">Connecting to video call...</p>
+                    </div>
+                  </div>
+                ) : !streamClient || !call ? (
+                  <div className="flex h-full items-center justify-center bg-base-200 p-4">
+                    <div className="w-full max-w-sm rounded-3xl border border-base-300 bg-base-100 p-6 text-center shadow-xl">
+                      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-error/10">
+                        <PhoneOffIcon className="h-7 w-7 text-error" />
+                      </div>
+                      <h3 className="text-lg font-bold">Connection Failed</h3>
+                      <p className="mt-2 text-sm text-base-content/65">Unable to connect to the video call.</p>
+                    </div>
+                  </div>
+                ) : (
+                  <StreamVideo client={streamClient}>
+                    <StreamCall call={call}>
+                      <VideoCallUI
+                        key="interview-session-video-call"
+                        chatClient={chatClient}
+                        channel={channel}
+                        userRole={isInterviewer ? 'interviewer' : 'candidate'}
+                      />
+                    </StreamCall>
+                  </StreamVideo>
+                )}
+              </div>
+            </div>
+          </Panel>
         </PanelGroup>
       </div>
     </div>

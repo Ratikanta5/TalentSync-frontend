@@ -121,7 +121,7 @@ function CodeEditor({
             <textarea
               value={code}
               onChange={(e) => onCodeChange(e.target.value)}
-              placeholder={`// Write your ${language} code here...\n\nfunction solve(nums) {\n  // Your solution\n}`}
+              placeholder={`Write your ${language} code here`}
               className="flex-1 px-4 py-4 bg-transparent text-white font-mono text-sm resize-none focus:outline-none placeholder-gray-600"
               spellCheck="false"
             />

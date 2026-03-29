@@ -9,6 +9,7 @@ function CodeEditorPanel({
   onLanguageChange,
   onCodeChange,
   onRunCode,
+  availableLanguages = Object.keys(LANGUAGE_CONFIG),
 }) {
   return (
     <div className="h-full bg-base-300 flex flex-col">
@@ -20,11 +21,16 @@ function CodeEditorPanel({
             className="size-6"
           />
           <select className="select select-sm" value={selectedLanguage} onChange={onLanguageChange}>
-            {Object.entries(LANGUAGE_CONFIG).map(([key, lang]) => (
-              <option key={key} value={key}>
-                {lang.name}
-              </option>
-            ))}
+            {availableLanguages.map((key) => {
+              const lang = LANGUAGE_CONFIG[key];
+              if (!lang) return null;
+
+              return (
+                <option key={key} value={key}>
+                  {lang.name}
+                </option>
+              );
+            })}
           </select>
         </div>
 
