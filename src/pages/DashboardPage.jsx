@@ -1,86 +1,74 @@
-import { useNavigate } from "react-router";
 import { useUser } from "@clerk/clerk-react";
-import { useState } from "react";
-import { useActiveSessions, useCreateSession, useMyRecentSessions } from "../hooks/useSessions";
+import { useState, useEffect } from "react";
+import axios from "../lib/axios";
 
 import Navbar from "../components/Navbar";
-import WelcomeSection from "../components/WelcomeSection";
-import StatsCards from "../components/StatsCards";
-import ActiveSessions from "../components/ActiveSessions";
-import RecentSessions from "../components/RecentSessions";
-import CreateSessionModal from "../components/CreateSessionModal";
+import InterviewerDashboard from "./InterviewerDashboard";
+import CandidateDashboard from "./CandidateDashboard";
 
 function DashboardPage() {
-  const navigate = useNavigate();
   const { user } = useUser();
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [roomConfig, setRoomConfig] = useState({ problem: "", difficulty: "" });
+  const [userRole, setUserRole] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  const createSessionMutation = useCreateSession();
-
-  const { data: activeSessionsData, isLoading: loadingActiveSessions } = useActiveSessions();
-  const { data: recentSessionsData, isLoading: loadingRecentSessions } = useMyRecentSessions();
-
-  const handleCreateRoom = () => {
-    if (!roomConfig.problem || !roomConfig.difficulty) return;
-
-    createSessionMutation.mutate(
-      {
-        problem: roomConfig.problem,
-        difficulty: roomConfig.difficulty.toLowerCase(),
-      },
-      {
-        onSuccess: (data) => {
-          setShowCreateModal(false);
-          navigate(`/session/${data.session._id}`);
-        },
+  // Fetch user role on mount
+  useEffect(() => {
+    const fetchUserRole = async () => {
+      try {
+        const response = await axios.get(`/users/${user?.id}/onboarding-status`);
+        if (response.data.success && response.data.data.user) {
+          setUserRole(response.data.data.user.role);
+          console.log('👤 User role:', response.data.data.user.role);
+        }
+      } catch (error) {
+        console.error('Error fetching user role:', error);
+      } finally {
+        setLoading(false);
       }
-    );
-  };
+    };
 
-  const activeSessions = activeSessionsData?.sessions || [];
-  const recentSessions = recentSessionsData?.sessions || [];
+    if (user?.id) {
+      fetchUserRole();
+    }
+  }, [user?.id]);
 
-  const isUserInSession = (session) => {
-    if (!user.id) return false;
-
-    return session.host?.clerkId === user.id || session.participant?.clerkId === user.id;
-  };
-
-  return (
-    <>
-      <div className="min-h-screen bg-base-300">
-        <Navbar />
-        <WelcomeSection onCreateSession={() => setShowCreateModal(true)} />
-
-        {/* Grid layout */}
-        <div className="container mx-auto px-6 pb-16">
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <StatsCards
-              activeSessionsCount={activeSessions.length}
-              recentSessionsCount={recentSessions.length}
-            />
-            <ActiveSessions
-              sessions={activeSessions}
-              isLoading={loadingActiveSessions}
-              isUserInSession={isUserInSession}
-            />
-          </div>
-
-          <RecentSessions sessions={recentSessions} isLoading={loadingRecentSessions} />
-        </div>
+  // Show loading state while fetching role
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-base-300 flex items-center justify-center">
+        <span className="loading loading-spinner loading-lg"></span>
       </div>
+    );
+  }
 
-      <CreateSessionModal
-        isOpen={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        roomConfig={roomConfig}
-        setRoomConfig={setRoomConfig}
-        onCreateRoom={handleCreateRoom}
-        isCreating={createSessionMutation.isPending}
-      />
-    </>
-  );
+  // Interviewer Dashboard
+  if (userRole === 'interviewer') {
+    return <InterviewerDashboard />;
+  }
+
+  // Admin Dashboard
+  if (userRole === 'admin') {
+    return (
+      <>
+        <div className="min-h-screen bg-base-300">
+          <Navbar />
+          <div className="container mx-auto px-6 py-12">
+            <h1 className="text-4xl font-bold mb-2">Admin Dashboard</h1>
+            <p className="text-base-content/60 mb-8">Manage platform and users</p>
+            
+            {/* Admin specific content */}
+            <div className="bg-base-100 rounded-lg p-6 shadow">
+              <h2 className="text-xl font-bold mb-4">System Management</h2>
+              <p className="text-base-content/60">Coming soon...</p>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // Candidate Dashboard (default)
+  return <CandidateDashboard />;
 }
 
 export default DashboardPage;

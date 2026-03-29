@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router";
-import { BookOpenIcon, LayoutDashboardIcon, SparklesIcon } from "lucide-react";
+import { LayoutDashboardIcon, SparklesIcon, Code2 } from "lucide-react";
 import { UserButton } from "@clerk/clerk-react";
 
 function Navbar() {
@@ -7,7 +7,12 @@ function Navbar() {
 
   console.log(location);
 
-  const isActive = (path) => location.pathname === path;
+  const isActive = (path) => {
+    if (path === '/') {
+      return location.pathname === path;
+    }
+    return location.pathname.startsWith(path);
+  };
 
   return (
     <nav className="bg-base-100/80 backdrop-blur-md border-b border-primary/20 sticky top-0 z-50 shadow-lg">
@@ -30,24 +35,6 @@ function Navbar() {
         </Link>
 
         <div className="flex items-center gap-1">
-          {/* PROBLEMS PAGE LINK */}
-          <Link
-            to={"/problems"}
-            className={`px-4 py-2.5 rounded-lg transition-all duration-200 
-              ${
-                isActive("/problems")
-                  ? "bg-primary text-primary-content"
-                  : "hover:bg-base-200 text-base-content/70 hover:text-base-content"
-              }
-              
-              `}
-          >
-            <div className="flex items-center gap-x-2.5">
-              <BookOpenIcon className="size-4" />
-              <span className="font-medium hidden sm:inline">Problems</span>
-            </div>
-          </Link>
-
           {/* DASHBORD PAGE LINK */}
           <Link
             to={"/dashboard"}
@@ -63,6 +50,24 @@ function Navbar() {
             <div className="flex items-center gap-x-2.5">
               <LayoutDashboardIcon className="size-4" />
               <span className="font-medium hidden sm:inline">Dashbord</span>
+            </div>
+          </Link>
+
+          {/* PRACTICE PAGE LINK */}
+          <Link
+            to={"/practice"}
+            className={`px-4 py-2.5 rounded-lg transition-all duration-200 
+              ${
+                isActive("/practice")
+                  ? "bg-primary text-primary-content"
+                  : "hover:bg-base-200 text-base-content/70 hover:text-base-content"
+              }
+              
+              `}
+          >
+            <div className="flex items-center gap-x-2.5">
+              <Code2 className="size-4" />
+              <span className="font-medium hidden sm:inline">Practice</span>
             </div>
           </Link>
 

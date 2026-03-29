@@ -31,12 +31,12 @@ function SessionPage() {
   const isHost = session?.host?.clerkId === user?.id;
   const isParticipant = session?.participant?.clerkId === user?.id;
 
-  const { call, channel, chatClient, isInitializingCall, streamClient } = useStreamClient(
+  // ✅ FIXED: useStreamClient now accepts 4 params (removed refetch)
+  const { call, channel, chatClient, isInitializingCall, streamClient, error: streamError } = useStreamClient(
     session,
     loadingSession,
     isHost,
-    isParticipant,
-    refetch // Refetch when participant leaves
+    isParticipant
   );
 
   // find the problem data based on session problem id
@@ -275,6 +275,22 @@ function SessionPage() {
                       </div>
                       <h2 className="card-title text-2xl">Connection Failed</h2>
                       <p className="text-base-content/70">Unable to connect to the video call</p>
+                      {streamError && (
+                        <p className="text-error text-sm mt-3 p-3 bg-error/10 rounded">
+                          <strong>Error:</strong> {streamError}
+                        </p>
+                      )}
+                      <div className="text-xs text-base-content/60 mt-3">
+                        <p>Session ID: {session?._id}</p>
+                        <p>Call ID: {session?.callId || 'Not set'}</p>
+                        <p>Your Role: {isHost ? 'Host' : isParticipant ? 'Participant' : 'Unknown'}</p>
+                      </div>
+                      <button 
+                        onClick={() => window.location.reload()}
+                        className="btn btn-primary btn-sm mt-3"
+                      >
+                        Refresh Page
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -282,7 +298,12 @@ function SessionPage() {
                 <div className="h-full">
                   <StreamVideo client={streamClient}>
                     <StreamCall call={call}>
-                      <VideoCallUI chatClient={chatClient} channel={channel} />
+                      <VideoCallUI 
+                        key="session-video-call-dynamic"
+                        chatClient={chatClient} 
+                        channel={channel}
+                        userRole={isHost ? 'interviewer' : 'candidate'}
+                      />
                     </StreamCall>
                   </StreamVideo>
                 </div>
