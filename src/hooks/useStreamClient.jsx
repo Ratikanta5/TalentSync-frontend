@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { StreamChat } from "stream-chat";
 import toast from "react-hot-toast";
 import { initializeStreamClient, disconnectStreamClient } from "../lib/stream";
@@ -21,10 +21,13 @@ function useStreamClient(session, isLoading, isHost, isParticipant) {
   const [channel, setChannel] = useState(null);
   const [isInitializingCall, setIsInitializingCall] = useState(true);
   const [error, setError] = useState(null);
+  const initRunIdRef = useRef(0);
 
   useEffect(() => {
     let videoCall = null;
     let chatClientInstance = null;
+    let isCancelled = false;
+    const currentRunId = ++initRunIdRef.current;
 
     const initCall = async () => {
       try {
@@ -115,6 +118,7 @@ function useStreamClient(session, isLoading, isHost, isParticipant) {
           },
           videoToken
         );
+        if (isCancelled || initRunIdRef.current !== currentRunId) return;
         console.log('✅ Video client initialized');
         setStreamClient(videoClient);
 
@@ -122,6 +126,10 @@ function useStreamClient(session, isLoading, isHost, isParticipant) {
         console.log('📞 Joining video call:', session.callId);
         videoCall = videoClient.call("default", session.callId);
         await videoCall.join({ create: true });
+        if (isCancelled || initRunIdRef.current !== currentRunId) {
+          await videoCall.leave().catch(() => {});
+          return;
+        }
         setCall(videoCall);
         console.log('✅ Joined video call successfully');
 
@@ -141,6 +149,10 @@ function useStreamClient(session, isLoading, isHost, isParticipant) {
           },
           token
         );
+        if (isCancelled || initRunIdRef.current !== currentRunId) {
+          await chatClientInstance.disconnectUser().catch(() => {});
+          return;
+        }
         setChatClient(chatClientInstance);
         console.log('✅ Chat client connected');
 
@@ -149,14 +161,30 @@ function useStreamClient(session, isLoading, isHost, isParticipant) {
         const channelIdToUse = session.channelId || session.callId;
         console.log('💬 Watching chat channel:', channelIdToUse);
         const chatChannel = chatClientInstance.channel("messaging", channelIdToUse);
-        await chatChannel.watch();
-        setChannel(chatChannel);
-        console.log('✅ Chat channel being watched');
+        try {
+          await chatChannel.watch();
+          if (isCancelled || initRunIdRef.current !== currentRunId) return;
+          setChannel(chatChannel);
+          console.log('✅ Chat channel being watched');
+        } catch (chatWatchError) {
+          if (isCancelled || initRunIdRef.current !== currentRunId) return;
+          setChannel(null);
+          console.error('❌ Chat channel watch failed:', {
+            message: chatWatchError?.message,
+            code: chatWatchError?.code,
+            channelId: channelIdToUse,
+            userId,
+          });
+          toast.error('Chat is unavailable for this session');
+        }
 
         toast.success('Connected to session!');
         console.log('🎉 Stream initialization complete');
         setError(null);
       } catch (error) {
+        if (isCancelled || initRunIdRef.current !== currentRunId) {
+          return;
+        }
         console.error('❌ Error initializing Stream:', error?.message);
         console.error('   Full error:', error);
         const errorMsg = error?.message || 'Failed to connect to video call';
@@ -167,7 +195,9 @@ function useStreamClient(session, isLoading, isHost, isParticipant) {
         setChatClient(null);
         setChannel(null);
       } finally {
-        setIsInitializingCall(false);
+        if (!isCancelled && initRunIdRef.current === currentRunId) {
+          setIsInitializingCall(false);
+        }
       }
     };
 
@@ -186,6 +216,7 @@ function useStreamClient(session, isLoading, isHost, isParticipant) {
 
     // ✅ CLEANUP: Disconnect when component unmounts or dependencies change
     return () => {
+      isCancelled = true;
       (async () => {
         try {
           console.log('🧹 Cleaning up Stream resources...');

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useUser } from '@clerk/clerk-react';
 import axios from '../lib/axios';
@@ -52,6 +52,7 @@ function InterviewSessionPage() {
   const [call, setCall] = useState(null);
   const [isInitializingCall, setIsInitializingCall] = useState(true);
   const [isStartingInterview, setIsStartingInterview] = useState(false);
+  const initRunIdRef = useRef(0);
 
   // Fetch interview details
   useEffect(() => {
@@ -95,6 +96,8 @@ function InterviewSessionPage() {
   useEffect(() => {
     let videoCall = null;
     let chatClientInstance = null;
+    let isCancelled = false;
+    const currentRunId = ++initRunIdRef.current;
 
     const initCall = async () => {
       // Must have streamCallId to initialize
@@ -222,6 +225,7 @@ function InterviewSessionPage() {
           },
           videoToken
         );
+        if (isCancelled || initRunIdRef.current !== currentRunId) return;
         console.log('✅ StreamVideoClient initialized');
         console.log('   Client exists:', !!client);
         console.log('   Client.user:', client?.user);
@@ -247,6 +251,10 @@ function InterviewSessionPage() {
             },
             token
           );
+          if (isCancelled || initRunIdRef.current !== currentRunId) {
+            await chatClientInstance.disconnectUser().catch(() => {});
+            return;
+          }
           setChatClient(chatClientInstance);
           console.log('✅ Chat client connected successfully and token verified');
         } catch (chatError) {
@@ -305,6 +313,10 @@ function InterviewSessionPage() {
           ]);
           
           await joinWithTimeout;
+          if (isCancelled || initRunIdRef.current !== currentRunId) {
+            await videoCall.leave().catch(() => {});
+            return;
+          }
           setCall(videoCall);
           console.log('✅ Successfully joined video call:', interview.streamCallId);
           
@@ -351,23 +363,25 @@ function InterviewSessionPage() {
         
         try {
           await chatChannel.watch();
+          if (isCancelled || initRunIdRef.current !== currentRunId) return;
           setChannel(chatChannel);
           console.log('✅ Watching chat channel:', interview.streamChannelId);
         } catch (watchError) {
-          // If permission denied, log detailed info for debugging
+          setChannel(null);
           console.error('❌ Failed to watch channel:', {
             message: watchError.message,
             code: watchError.code,
             channelId: interview.streamChannelId,
             userId: userId
           });
-          // Still set the channel even if watch failed - messages might still work
-          setChannel(chatChannel);
-          // Don't necessarily fail - continue anyway
+          toast.error('Chat is unavailable for this interview');
         }
 
         toast.success('Connected to video call!');
       } catch (error) {
+        if (isCancelled || initRunIdRef.current !== currentRunId) {
+          return;
+        }
         const errorMsg = error?.message || String(error);
         const isWSError = errorMsg.includes('WS') || 
                           errorMsg.includes('WebSocket') || 
@@ -395,7 +409,9 @@ function InterviewSessionPage() {
           console.error('\n   Try: Refresh page, check internet, disable VPN/proxy');
         }
       } finally {
-        setIsInitializingCall(false);
+        if (!isCancelled && initRunIdRef.current === currentRunId) {
+          setIsInitializingCall(false);
+        }
       }
     };
 
@@ -405,6 +421,7 @@ function InterviewSessionPage() {
 
     // Cleanup
     return () => {
+      isCancelled = true;
       (async () => {
         try {
           if (videoCall) await videoCall.leave();
