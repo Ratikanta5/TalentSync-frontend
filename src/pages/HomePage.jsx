@@ -151,7 +151,7 @@ const HomePage = () => {
         </div>
       </div>
 
-    {/* FEATURES SECTION */}
+      {/* FEATURES SECTION */}
       <div className="max-w-7xl mx-auto px-4 py-20">
         <div className="text-center mb-16">
           <h2 className="text-4xl font-bold mb-4">
