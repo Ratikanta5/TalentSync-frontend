@@ -106,7 +106,7 @@ const OnboardingPage = () => {
         toast.error(error.response.data?.message || error.response.data?.error || 'Failed to complete onboarding');
       } else if (error.request) {
         console.error('❌ Request made but no response:', error.request);
-        toast.error('No response from server. Check if backend is running on http://localhost:3000');
+        toast.error(`No response from server. Check if backend is running on ${axios.defaults.baseURL || 'the configured API URL'}`);
       } else {
         console.error('❌ Error setting up request:', error.message);
         toast.error(`Error: ${error.message}`);
